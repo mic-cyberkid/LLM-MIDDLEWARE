@@ -1,0 +1,357 @@
+# Author : Cyberkid
+# Lazy Script
+from fastapi import FastAPI, APIRouter, Body, HTTPException, Depends, status, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from memory_manager import MemoryManager
+from passlib.context import CryptContext
+from sqlalchemy.dialects.sqlite import BLOB as SQLiteUUID  # Use for SQLite
+from sqlalchemy.types import CHAR
+from jose import JWTError, jwt
+from passlib.hash import bcrypt
+from datetime import datetime, timedelta
+from pydantic import BaseModel
+import shutil
+import uuid
+import sqlite3
+import requests
+import os
+
+# === CONFIG ===
+DB_URL = "sqlite:///data/chatbot.db"
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+engine = create_engine(DB_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+memory_store = {}
+
+
+# === MODELS ===
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    chats = relationship("Chat", back_populates="user")
+
+class Chat(Base):
+    __tablename__ = 'chats'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    role = Column(String)
+    content = Column(Text)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="chats")
+    # Add this field to Chat:
+    conversation_id = Column(String(36), index=True)  # For compatibility across DBs
+
+
+class SignInRequest(BaseModel):
+    username: str
+    password: str
+    
+# === INIT DATABASE ===
+def init_db():
+    os.makedirs("data", exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+
+# === AUTH ===
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# === APP SETUP ===
+app = FastAPI()
+chat_router = APIRouter()
+init_db()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/llm/token")
+
+# === UTILS ===
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# === AUTH ROUTES ===
+@chat_router.post("/register")
+def register_user(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    if db.query(User).filter_by(username=form_data.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    hashed = get_password_hash(form_data.password)
+    user = User(username=form_data.username, hashed_password=hashed)
+    db.add(user)
+    db.commit()
+    print("User registered : "+form_data.username)
+    return {"msg": "User registered"}
+
+    
+    
+
+@chat_router.post("/signin")
+def signin(payload: SignInRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(username=payload.username).first()
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    access_token = create_access_token({"sub": user.username})
+    print("User logged in : "+access_token)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username
+    }
+   
+@chat_router.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(username=form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token({"sub": user.username})
+    print("User logged in : "+ token)
+    return {"access_token": token, "token_type": "bearer"}
+    
+    
+    
+# === CHAT ===
+@chat_router.post("/chat")
+def chat(
+    conversation_id: str = Body(None),
+    message: str = Body(...),
+    new_chat: bool = Body(False),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    print("Received Messgae : "+ message)
+
+    # Generate new UUID if starting a new chat or none provided
+    if new_chat and conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot provide both 'new_chat=true' and a conversation_id. Choose one."
+        )
+    
+    if new_chat:
+        conversation_id = str(uuid.uuid4())
+
+    
+    print("Initializing memory...")
+    key = f"{conversation_id}"
+    print(key)
+    memory_dir = f"data/memory/{username}/{conversation_id}"
+    os.makedirs(memory_dir, exist_ok=True)
+    index_path = os.path.join(memory_dir, "faiss.index")
+    memory_path = os.path.join(memory_dir, "memory.pkl")
+
+    if key not in memory_store:
+        memory = MemoryManager(index_path=index_path, memory_path=memory_path)
+
+        if not os.path.exists(index_path) or not os.path.exists(memory_path):
+            history = db.query(Chat).filter_by(user_id=user.id, conversation_id=conversation_id).order_by(Chat.timestamp.asc()).all()
+            for h in history:
+                memory.add_message(h.role, h.content)
+
+        memory_store[key] = memory
+
+    memory = memory_store[key]
+    print("Done ..")
+    memory.add_message("user", message)
+    print("Addded message")
+    context = memory.get_context(message)
+    prompt = ""
+    for msg in context:
+        prompt += f"{msg['role'].capitalize()}: {msg['content']}\n"
+    prompt += "Assistant:"
+
+    
+    print("Sending request to llama .....")
+    response = requests.post("http://localhost:11434/api/generate", json={
+        "model": "qwen1.5_q8",
+        "prompt": message, # prompt
+        "stream": False
+    }).json()["response"]
+    print("Sent ! : "+response)
+    memory.add_message("assistant", response)
+
+    db.add(Chat(user_id=user.id, conversation_id=conversation_id, role="user", content=message))
+    db.add(Chat(user_id=user.id, conversation_id=conversation_id, role="assistant", content=response))
+    db.commit()
+
+    return {
+        "response": response,
+        "conversation_id": conversation_id
+    }
+
+#===== Conversations ====
+# Get chat history
+@chat_router.get("/conversations")
+def list_conversations(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    conversation_ids = (
+        db.query(Chat.conversation_id)
+        .filter_by(user_id=user.id)
+        .distinct()
+        .all()
+    )
+
+    conversations = []
+    for conv_id_tuple in conversation_ids:
+        conv_id = conv_id_tuple[0]
+        first_msg = (
+            db.query(Chat)
+            .filter_by(user_id=user.id, conversation_id=conv_id, role="user")
+            .order_by(Chat.timestamp.asc())
+            .first()
+        )
+        if first_msg:
+            header = " ".join(first_msg.content.split()[:20])
+            conversations.append({
+                "conversation_id": conv_id,
+                "conversation_header": header
+            })
+
+    return {"messages": conversations, "total": len(conversations)}
+
+
+# Fetch messages for converstion
+@chat_router.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: str, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    chats = db.query(Chat).filter_by(user_id=user.id, conversation_id=conversation_id).order_by(Chat.timestamp).all()
+    if not chats:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    user_msgs = [chat.content for chat in chats if chat.role == "user"]
+    bot_msgs = [chat.content for chat in chats if chat.role == "assistant"]
+
+    return {
+        "conversation_id": conversation_id,
+        "conversations": {
+            "userMessages": user_msgs,
+            "botMessages": bot_msgs
+        }
+    }
+
+# Delete conversation
+@chat_router.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    chats = db.query(Chat).filter_by(user_id=user.id, conversation_id=conversation_id).all()
+    if not chats:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    for chat in chats:
+        db.delete(chat)
+    db.commit()
+
+    shutil.rmtree(f"data/memory/{username}/{conversation_id}", ignore_errors=True)
+    memory_store.pop(f"{username}:{conversation_id}", None)
+
+    return {"status": "deleted"}
+
+
+# Get info about conversation (/llm/debug/memory?conversation_id=1)
+@chat_router.get("/debug/memory")
+def debug_memory(conversation_id: str = Query(...), token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    key = f"{username}:{conversation_id}"
+    memory_dir = f"data/memory/{username}/{conversation_id}"
+    index_path = os.path.join(memory_dir, "faiss.index")
+    memory_path = os.path.join(memory_dir, "memory.pkl")
+
+    if key not in memory_store:
+        if not os.path.exists(index_path) or not os.path.exists(memory_path):
+            raise HTTPException(status_code=404, detail="No memory found for this conversation.")
+        memory = MemoryManager(index_path=index_path, memory_path=memory_path)
+        memory_store[key] = memory
+
+    memory = memory_store[key]
+
+    return {
+        "recent_history": memory.recent_history,
+        "summary": memory.summarize_old(),
+        "long_term_count": len(memory.long_term_memory),
+        "vector_index_size": len(memory.vector_map)
+    }
+
+
+# === ROUTE REGISTRATION ===
+app.include_router(chat_router, prefix="/llm")
+
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("FullServer:app", host="0.0.0.0", port=8000, reload=False)
