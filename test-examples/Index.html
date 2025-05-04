@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Chat Interface</title>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --secondary: #f9fafb;
+            --text: #111827;
+            --bg: #ffffff;
+            --border: #e5e7eb;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            background-color: var(--bg);
+            margin: 0;
+            padding: 0;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+            height: 100vh;
+        }
+        
+        .auth-section, .conversation-list, .chat-container {
+            background-color: var(--secondary);
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 40px);
+        }
+        
+        .chat-messages {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background-color: white;
+        }
+        
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+        
+        .user-message {
+            background-color: var(--primary);
+            color: white;
+            margin-left: auto;
+        }
+        
+        .assistant-message {
+            background-color: var(--border);
+            margin-right: auto;
+        }
+        
+        .message-form {
+            display: flex;
+            gap: 10px;
+        }
+        
+        input, textarea, button {
+            padding: 10px 15px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 16px;
+        }
+        
+        button {
+            background-color: var(--primary);
+            color: white;
+            cursor: pointer;
+            border: none;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background-color: #4338ca;
+        }
+        
+        button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        
+        .conversation-item {
+            padding: 10px;
+            margin-bottom: 5px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .conversation-item:hover {
+            background-color: var(--border);
+        }
+        
+        .conversation-item.active {
+            background-color: var(--primary);
+            color: white;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .error-message {
+            color: #ef4444;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="auth-section" id="authSection">
+                <h2>Authentication</h2>
+                <div id="loginForm">
+                    <h3>Login</h3>
+                    <div>
+                        <label for="username">Username:</label>
+                        <input type="text" id="username" required>
+                    </div>
+                    <div>
+                        <label for="password">Password:</label>
+                        <input type="password" id="password" required>
+                    </div>
+                    <button id="loginBtn">Login</button>
+                    <button id="showRegisterBtn">Register Instead</button>
+                    <p class="error-message" id="loginError"></p>
+                </div>
+                
+                <div id="registerForm" class="hidden">
+                    <h3>Register</h3>
+                    <div>
+                        <label for="regUsername">Username:</label>
+                        <input type="text" id="regUsername" required>
+                    </div>
+                    <div>
+                        <label for="regPassword">Password:</label>
+                        <input type="password" id="regPassword" required>
+                    </div>
+                    <button id="registerBtn">Register</button>
+                    <button id="showLoginBtn">Login Instead</button>
+                    <p class="error-message" id="registerError"></p>
+                </div>
+            </div>
+            
+            <div class="conversation-list hidden" id="conversationList">
+                <h2>Conversations</h2>
+                <button id="newChatBtn">New Chat</button>
+                <div id="conversations"></div>
+            </div>
+        </div>
+        
+        <div class="chat-container hidden" id="chatContainer">
+            <div class="chat-header">
+                <h2 id="chatTitle">New Chat</h2>
+            </div>
+            <div class="chat-messages" id="chatMessages"></div>
+            <form class="message-form" id="messageForm">
+                <textarea id="messageInput" rows="2" placeholder="Type your message..." required></textarea>
+                <button type="submit" id="sendBtn">Send</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let authToken = null;
+        let currentConversationId = null;
+        const BASE_URL = "http://localhost:8000/llm";
+        
+        // DOM elements
+        const loginForm = document.getElementById('loginForm');
+        const registerForm = document.getElementById('registerForm');
+        const showRegisterBtn = document.getElementById('showRegisterBtn');
+        const showLoginBtn = document.getElementById('showLoginBtn');
+        const loginBtn = document.getElementById('loginBtn');
+        const registerBtn = document.getElementById('registerBtn');
+        const loginError = document.getElementById('loginError');
+        const registerError = document.getElementById('registerError');
+        const conversationList = document.getElementById('conversationList');
+        const chatContainer = document.getElementById('chatContainer');
+        const conversationsList = document.getElementById('conversations');
+        const newChatBtn = document.getElementById('newChatBtn');
+        const chatMessages = document.getElementById('chatMessages');
+        const messageForm = document.getElementById('messageForm');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const chatTitle = document.getElementById('chatTitle');
+        
+        // Event listeners
+        showRegisterBtn.addEventListener('click', () => {
+            loginForm.classList.add('hidden');
+            registerForm.classList.remove('hidden');
+        });
+        
+        showLoginBtn.addEventListener('click', () => {
+            registerForm.classList.add('hidden');
+            loginForm.classList.remove('hidden');
+        });
+        
+        loginBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            try {
+                loginError.textContent = '';
+                loginBtn.disabled = true;
+                
+                authToken = await loginUser(username, password);
+                await loadConversations();
+                
+                conversationList.classList.remove('hidden');
+                chatContainer.classList.remove('hidden');
+                document.getElementById('authSection').classList.add('hidden');
+            } catch (error) {
+                loginError.textContent = error.message;
+            } finally {
+                loginBtn.disabled = false;
+            }
+        });
+        
+        registerBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('regUsername').value;
+            const password = document.getElementById('regPassword').value;
+            
+            try {
+                registerError.textContent = '';
+                registerBtn.disabled = true;
+                
+                authToken = await registerUser(username, password);
+                await loadConversations();
+                
+                conversationList.classList.remove('hidden');
+                chatContainer.classList.remove('hidden');
+                document.getElementById('authSection').classList.add('hidden');
+            } catch (error) {
+                registerError.textContent = error.message;
+            } finally {
+                registerBtn.disabled = false;
+            }
+        });
+        
+        newChatBtn.addEventListener('click', () => {
+            startNewChat();
+        });
+        
+        messageForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message) return;
+            
+            try {
+                sendBtn.disabled = true;
+                messageInput.disabled = true;
+                
+                // Add user message to UI immediately
+                addMessageToUI('user', message);
+                messageInput.value = '';
+                
+                if (currentConversationId === null) {
+                    // Start new conversation
+                    currentConversationId = await startNewChat(message);
+                    chatTitle.textContent = `Chat #${currentConversationId}`;
+                } else {
+                    // Continue existing conversation
+                    await continueChat(message);
+                }
+                
+                await loadConversations();
+            } catch (error) {
+                console.error('Error sending message:', error);
+                addMessageToUI('system', `Error: ${error.message}`);
+            } finally {
+                sendBtn.disabled = false;
+                messageInput.disabled = false;
+                messageInput.focus();
+            }
+        });
+        
+        // API Functions
+        async function loginUser(username, password) {
+            const formData = new URLSearchParams();
+            formData.append('username', username);
+            formData.append('password', password);
+            
+            const response = await fetch(`${BASE_URL}/token`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Login failed');
+            }
+            
+            const data = await response.json();
+            return data.access_token;
+        }
+        
+        async function registerUser(username, password) {
+            const formData = new URLSearchParams();
+            formData.append('username', username);
+            formData.append('password', password);
+            
+            const response = await fetch(`${BASE_URL}/register`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                if (response.status === 400 && error.detail === "Username already exists") {
+                    return loginUser(username, password);
+                }
+                throw new Error(error.detail || 'Registration failed');
+            }
+            
+            return loginUser(username, password);
+        }
+        
+        async function startNewChat(firstMessage = null) {
+            const headers = {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            };
+            
+            const body = {
+                message: firstMessage,
+                conversation_id: -1  // Indicates new chat
+            };
+            
+            const response = await fetch(`${BASE_URL}/chat`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(body)
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to start chat');
+            }
+            
+            const data = await response.json();
+            
+            if (firstMessage && data.response) {
+                addMessageToUI('assistant', data.response);
+            }
+            
+            return data.conversation_id;
+        }
+        
+        async function continueChat(message) {
+            const headers = {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            };
+            
+            const body = {
+                conversation_id: currentConversationId,
+                message: message
+            };
+            
+            const response = await fetch(`${BASE_URL}/chat`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(body)
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to send message');
+            }
+            
+            const data = await response.json();
+            addMessageToUI('assistant', data.response);
+        }
+        
+        async function loadConversations() {
+            const headers = {
+                'Authorization': `Bearer ${authToken}`
+            };
+            
+            const response = await fetch(`${BASE_URL}/conversations`, {
+                method: 'GET',
+                headers: headers
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to load conversations');
+            }
+            
+            const data = await response.json();
+            renderConversations(data.messages);
+            return data.messages;
+        }
+        
+        // UI Functions
+        function renderConversations(conversations) {
+            conversationsList.innerHTML = '';
+            
+            conversations.forEach(conv => {
+                const convElement = document.createElement('div');
+                convElement.className = `conversation-item ${currentConversationId === conv.conversation_id ? 'active' : ''}`;
+                convElement.textContent = `#${conv.conversation_id}: ${conv.conversation_header.substring(0, 30)}...`;
+                
+                convElement.addEventListener('click', () => {
+                    currentConversationId = conv.conversation_id;
+                    loadChatHistory(conv.conversation_id);
+                });
+                
+                conversationsList.appendChild(convElement);
+            });
+        }
+        
+        async function loadChatHistory(conversationId) {
+            chatMessages.innerHTML = '';
+            currentConversationId = conversationId;
+            chatTitle.textContent = `Chat #${conversationId}`;
+            
+            const headers = {
+                'Authorization': `Bearer ${authToken}`
+            };
+            
+            const response = await fetch(`${BASE_URL}/conversations/${conversationId}`, {
+                method: 'GET',
+                headers: headers
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to load chat history');
+            }
+            
+            const data = await response.json();
+            
+            // Render conversation history
+            const userMessages = data.conversations.userMessages || [];
+            const botMessages = data.conversations.botMessages || [];
+            
+            const maxLength = Math.max(userMessages.length, botMessages.length);
+            for (let i = 0; i < maxLength; i++) {
+                if (userMessages[i]) {
+                    addMessageToUI('user', userMessages[i]);
+                }
+                if (botMessages[i]) {
+                    addMessageToUI('assistant', botMessages[i]);
+                }
+            }
+            
+            // Update active conversation in list
+            const convItems = document.querySelectorAll('.conversation-item');
+            convItems.forEach(item => {
+                item.classList.remove('active');
+                if (item.textContent.includes(`#${conversationId}`)) {
+                    item.classList.add('active');
+                }
+            });
+        }
+        
+        function addMessageToUI(role, content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}-message`;
+            messageDiv.textContent = content;
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function startNewChat() {
+            currentConversationId = null;
+            chatMessages.innerHTML = '';
+            chatTitle.textContent = 'New Chat';
+            
+            // Update active conversation in list
+            const convItems = document.querySelectorAll('.conversation-item');
+            convItems.forEach(item => item.classList.remove('active'));
+        }
+    </script>
+</body>
+</html>
