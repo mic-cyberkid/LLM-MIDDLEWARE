@@ -4,7 +4,7 @@ from starlette.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
-from mem import MemoryManager  
+from memory_manager import MemoryManager  
 from passlib.context import CryptContext
 from sqlalchemy.dialects.sqlite import BLOB as SQLiteUUID
 from sqlalchemy.types import CHAR
